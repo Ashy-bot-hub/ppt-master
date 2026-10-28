@@ -992,6 +992,7 @@ def _resolve_animation_groups(
     preliminaries.sort(key=lambda item: (item[0], item[1], item[2]))
 
     states: list[AnimationGroupState] = []
+    previous_delay_ms = 0
     for sequence_index, (
         order,
         source_index,
@@ -1020,16 +1021,20 @@ def _resolve_animation_groups(
             timing_options,
             label=f'canonical animation for "{effect_path}"',
         )
-        default_delay = (
-            settings.stagger_ms / 1000
-            if effect_trigger == "after-previous" and sequence_index > 0
-            else 0
-        )
+        # Mirrors the exporter: an omitted with-previous delay repeats the
+        # previous row's beat-relative delay.
+        if effect_trigger == "after-previous" and sequence_index > 0:
+            default_delay = settings.stagger_ms / 1000
+        elif effect_trigger == "with-previous":
+            default_delay = previous_delay_ms / 1000
+        else:
+            default_delay = 0
         original_delay_ms = animation_seconds_to_milliseconds(
             effect_cfg.get("delay", default_delay),
             f'canonical animation delay for "{effect_path}"',
             allow_zero=True,
         )
+        previous_delay_ms = original_delay_ms
         states.append(
             AnimationGroupState(
                 group_id=group_id,
@@ -1245,11 +1250,9 @@ def rebuild_animations(
                 f'Derived animation slide "{slide_name}" groups must be an object'
             )
 
-        # Start modes are row-relative; slide completion spans overlapping rows.
-        previous_start_ms = 0
-        previous_row_end_ms = 0
+        # With-previous delays share a beat; after-previous waits for all rows.
+        beat_start_ms = 0
         timeline_end_ms = 0
-        has_previous_row = False
         referenced_cues: set[int] = set()
         seen_groups: set[str] = set()
         for state in states:
@@ -1260,12 +1263,9 @@ def rebuild_animations(
                 if first_group_effect
                 else None
             )
-            if not has_previous_row:
-                sequence_base_ms = 0
-            elif state.trigger == "with-previous":
-                sequence_base_ms = previous_start_ms
-            else:
-                sequence_base_ms = previous_row_end_ms
+            if state.trigger == "after-previous":
+                beat_start_ms = timeline_end_ms
+            sequence_base_ms = beat_start_ms
             if cue_number is None:
                 if first_group_effect:
                     fallback_count += 1
@@ -1310,10 +1310,7 @@ def rebuild_animations(
             effect_value["order"] = state.order
             effect_value["delay"] = _seconds_from_ms(delay_ms)
             effect_value["trigger"] = state.trigger
-            previous_start_ms = actual_start_ms
-            previous_row_end_ms = actual_start_ms + state.duration_ms
-            timeline_end_ms = max(timeline_end_ms, previous_row_end_ms)
-            has_previous_row = True
+            timeline_end_ms = max(timeline_end_ms, actual_start_ms + state.duration_ms)
 
         ignored_cue_count += len(cues) - len(referenced_cues)
 
